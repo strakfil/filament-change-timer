@@ -255,7 +255,7 @@ rows.append(
 )
 
 table_html = build_intervals_table_html(rows)
-st.markdown(table_html, unsafe_allow_html=True)
+st.html(table_html)
 
 st.subheader("M600 řádky")
 
