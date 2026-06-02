@@ -167,7 +167,57 @@ rows.append(
     }
 )
 
-st.dataframe(rows, use_container_width=True, hide_index=True)
+def color_cell(hex_color: str) -> str:
+    if not hex_color:
+        return ""
+
+    color = hex_color if hex_color.startswith("#") else f"#{hex_color}"
+
+    return (
+        f'<span style="display:inline-block;width:18px;height:18px;'
+        f'background:{color};border:1px solid #888;border-radius:4px;'
+        f'vertical-align:middle;margin-right:8px;"></span>'
+        f'<code>{color}</code>'
+    )
+
+
+table_html = """
+<table style="width:100%; border-collapse:collapse;">
+  <thead>
+    <tr>
+      <th style="text-align:left; padding:8px; border-bottom:1px solid #ddd;">Úsek</th>
+      <th style="text-align:left; padding:8px; border-bottom:1px solid #ddd;">Interval</th>
+      <th style="text-align:left; padding:8px; border-bottom:1px solid #ddd;">Minuty</th>
+      <th style="text-align:left; padding:8px; border-bottom:1px solid #ddd;">Řádek</th>
+      <th style="text-align:left; padding:8px; border-bottom:1px solid #ddd;">NEXT</th>
+      <th style="text-align:left; padding:8px; border-bottom:1px solid #ddd;">Barva</th>
+      <th style="text-align:left; padding:8px; border-bottom:1px solid #ddd;">Další výměna za</th>
+      <th style="text-align:left; padding:8px; border-bottom:1px solid #ddd;">NEXT_CHANGE_MIN</th>
+    </tr>
+  </thead>
+  <tbody>
+"""
+
+for row in rows:
+    table_html += f"""
+    <tr>
+      <td style="padding:8px; border-bottom:1px solid #eee;">{row["Úsek"]}</td>
+      <td style="padding:8px; border-bottom:1px solid #eee;">{row["Interval"]}</td>
+      <td style="padding:8px; border-bottom:1px solid #eee;">{row["Minuty"]}</td>
+      <td style="padding:8px; border-bottom:1px solid #eee;">{row["Řádek"]}</td>
+      <td style="padding:8px; border-bottom:1px solid #eee;">{row["NEXT"]}</td>
+      <td style="padding:8px; border-bottom:1px solid #eee;">{color_cell(row["Barva"])}</td>
+      <td style="padding:8px; border-bottom:1px solid #eee;">{row["Další výměna za"]}</td>
+      <td style="padding:8px; border-bottom:1px solid #eee;">{row["NEXT_CHANGE_MIN"]}</td>
+    </tr>
+    """
+
+table_html += """
+  </tbody>
+</table>
+"""
+
+st.markdown(table_html, unsafe_allow_html=True)
 
 st.subheader("M600 řádky")
 
