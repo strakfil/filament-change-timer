@@ -31,6 +31,25 @@ def fmt_minutes(minutes: Optional[int]) -> str:
     return f"{mins} min"
 
 
+def critical_warning_text(count: int) -> str:
+    if count == 1:
+        return (
+            f"Pozor: 1 další výměna je do {CRITICAL_CHANGE_MINUTES} minut. "
+            "V tabulce je zvýrazněná žlutě."
+        )
+
+    if 2 <= count <= 4:
+        return (
+            f"Pozor: {count} další výměny jsou do {CRITICAL_CHANGE_MINUTES} minut. "
+            "V tabulce jsou zvýrazněné žlutě."
+        )
+
+    return (
+        f"Pozor: {count} dalších výměn je do {CRITICAL_CHANGE_MINUTES} minut. "
+        "V tabulce jsou zvýrazněné žlutě."
+    )
+
+
 @st.cache_data(show_spinner=False)
 def parse_gcode_bytes(raw: bytes):
     total_remaining: Optional[int] = None
@@ -369,10 +388,7 @@ if uploaded is not None:
         ]
 
         if critical_events:
-            st.warning(
-                f"Pozor: {len(critical_events)} další výměna/výměny jsou do "
-                f"{CRITICAL_CHANGE_MINUTES} minut. V tabulce jsou zvýrazněné žlutě."
-            )
+            st.warning(critical_warning_text(len(critical_events)))
 
         st.html(build_intervals_table_html(rows, show_technical_columns))
 
