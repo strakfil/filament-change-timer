@@ -10,10 +10,12 @@ import streamlit as st
 
 PRAGUE_TZ = ZoneInfo("Europe/Prague")
 
-M73_RE = re.compile(r"\bM73\b.*?\bR(\d+)\b")
-M600_RE = re.compile(r"^\s*M600\b", re.IGNORECASE)
-COLOR_RE = re.compile(r"\bCOLOR=([#A-Fa-f0-9]+)")
-NEXT_RE = re.compile(r"\bNEXT=([0-9-]+)")
+M73_RE = re.compile(rb"\bM73\b.*?\bR(\d+)\b")
+M600_RE = re.compile(rb"^\s*M600\b", re.IGNORECASE)
+COLOR_RE = re.compile(rb"\bCOLOR=([#A-Fa-f0-9]+)")
+NEXT_RE = re.compile(rb"\bNEXT=([0-9-]+)")
+
+CRITICAL_CHANGE_MINUTES = 10
 
 
 def fmt_minutes(minutes: Optional[int]) -> str:
@@ -29,14 +31,16 @@ def fmt_minutes(minutes: Optional[int]) -> str:
     return f"{mins} min"
 
 
-def parse_gcode_text(text: str):
-    lines = text.splitlines()
-
+@st.cache_data(show_spinner=False)
+def parse_gcode_bytes(raw: bytes):
     total_remaining: Optional[int] = None
     last_remaining: Optional[int] = None
     events = []
+    line_count = 0
 
-    for idx, line in enumerate(lines):
+    for idx, line in enumerate(raw.splitlines()):
+        line_count = idx + 1
+
         m73 = M73_RE.search(line)
         if m73:
             last_remaining = int(m73.group(1))
@@ -51,10 +55,10 @@ def parse_gcode_text(text: str):
                 {
                     "line_index": idx,
                     "line_number": idx + 1,
-                    "line": line,
+                    "line": line.decode("utf-8", errors="replace"),
                     "remaining": last_remaining,
-                    "color": color.group(1) if color else "",
-                    "next": nxt.group(1) if nxt else "",
+                    "color": color.group(1).decode("utf-8", errors="replace") if color else "",
+                    "next": nxt.group(1).decode("utf-8", errors="replace") if nxt else "",
                 }
             )
 
@@ -84,11 +88,19 @@ def parse_gcode_text(text: str):
         else:
             event["next_change_min"] = -1
 
-    return lines, total_remaining, events
+        event["is_critical"] = (
+            event["next_change_min"] > 0
+            and event["next_change_min"] <= CRITICAL_CHANGE_MINUTES
+        )
+
+    return line_count, total_remaining, events
 
 
-def make_modified_gcode(lines: list[str], events: list[dict]) -> str:
-    out_lines = list(lines)
+def make_modified_gcode(raw: bytes, events: list[dict]) -> str:
+    out_lines = [
+        line.decode("utf-8", errors="replace")
+        for line in raw.splitlines()
+    ]
 
     for event in events:
         idx = event["line_index"]
@@ -132,35 +144,51 @@ def build_color_badge(hex_color: str) -> str:
     )
 
 
-def build_intervals_table_html(rows: list[dict]) -> str:
-    table_html = """
-    <table style="width:100%; border-collapse:collapse; font-family:sans-serif; font-size:14px;">
+def build_intervals_table_html(rows: list[dict], show_technical_columns: bool = False) -> str:
+    technical_headers = ""
+    if show_technical_columns:
+        technical_headers = """
+          <th style="text-align:left; padding:8px; border-bottom:1px solid #ddd;">Minuty</th>
+          <th style="text-align:left; padding:8px; border-bottom:1px solid #ddd;">Řádek</th>
+          <th style="text-align:left; padding:8px; border-bottom:1px solid #ddd;">NEXT</th>
+          <th style="text-align:left; padding:8px; border-bottom:1px solid #ddd;">Další výměna za</th>
+          <th style="text-align:left; padding:8px; border-bottom:1px solid #ddd;">NEXT_CHANGE_MIN</th>
+        """
+
+    table_html = f"""
+    <table style="width:100%; border-collapse:collapse; font-family:sans-serif; font-size:15px;">
       <thead>
         <tr>
           <th style="text-align:left; padding:8px; border-bottom:1px solid #ddd;">Úsek</th>
           <th style="text-align:left; padding:8px; border-bottom:1px solid #ddd;">Interval</th>
-          <th style="text-align:left; padding:8px; border-bottom:1px solid #ddd;">Minuty</th>
-          <th style="text-align:left; padding:8px; border-bottom:1px solid #ddd;">Řádek</th>
-          <th style="text-align:left; padding:8px; border-bottom:1px solid #ddd;">NEXT</th>
           <th style="text-align:left; padding:8px; border-bottom:1px solid #ddd;">Barva</th>
-          <th style="text-align:left; padding:8px; border-bottom:1px solid #ddd;">Další výměna za</th>
-          <th style="text-align:left; padding:8px; border-bottom:1px solid #ddd;">NEXT_CHANGE_MIN</th>
+          {technical_headers}
         </tr>
       </thead>
       <tbody>
     """
 
     for row in rows:
+        is_critical = row.get("Kritická", False)
+        row_style = "background:#fff3cd;" if is_critical else ""
+        warning_badge = " ⚠️" if is_critical else ""
+
+        technical_cells = ""
+        if show_technical_columns:
+            technical_cells = f"""
+              <td style="padding:8px; border-bottom:1px solid #eee;">{html.escape(str(row["Minuty"]))}</td>
+              <td style="padding:8px; border-bottom:1px solid #eee;">{html.escape(str(row["Řádek"]))}</td>
+              <td style="padding:8px; border-bottom:1px solid #eee;">{html.escape(str(row["NEXT"]))}</td>
+              <td style="padding:8px; border-bottom:1px solid #eee;">{html.escape(str(row["Další výměna za"]))}</td>
+              <td style="padding:8px; border-bottom:1px solid #eee;">{html.escape(str(row["NEXT_CHANGE_MIN"]))}</td>
+            """
+
         table_html += f"""
-        <tr>
-          <td style="padding:8px; border-bottom:1px solid #eee;">{html.escape(str(row["Úsek"]))}</td>
+        <tr style="{row_style}">
+          <td style="padding:8px; border-bottom:1px solid #eee;">{html.escape(str(row["Úsek"]))}{warning_badge}</td>
           <td style="padding:8px; border-bottom:1px solid #eee;">{html.escape(str(row["Interval"]))}</td>
-          <td style="padding:8px; border-bottom:1px solid #eee;">{html.escape(str(row["Minuty"]))}</td>
-          <td style="padding:8px; border-bottom:1px solid #eee;">{html.escape(str(row["Řádek"]))}</td>
-          <td style="padding:8px; border-bottom:1px solid #eee;">{html.escape(str(row["NEXT"]))}</td>
           <td style="padding:8px; border-bottom:1px solid #eee;">{build_color_badge(str(row["Barva"]))}</td>
-          <td style="padding:8px; border-bottom:1px solid #eee;">{html.escape(str(row["Další výměna za"]))}</td>
-          <td style="padding:8px; border-bottom:1px solid #eee;">{html.escape(str(row["NEXT_CHANGE_MIN"]))}</td>
+          {technical_cells}
         </tr>
         """
 
@@ -263,24 +291,20 @@ st.caption(
 
 uploaded = st.file_uploader("Nahraj .gcode soubor", type=["gcode", "gco", "txt"])
 
-lines = []
+raw = b""
 events = []
 total_remaining: Optional[int] = None
+line_count = 0
 
 if uploaded is not None:
-    raw = uploaded.read()
+    raw = uploaded.getvalue()
 
-    try:
-        text = raw.decode("utf-8", errors="replace")
-    except Exception:
-        st.error("Soubor se nepodařilo přečíst jako text.")
-        st.stop()
-
-    try:
-        lines, total_remaining, events = parse_gcode_text(text)
-    except ValueError as error:
-        st.error(str(error))
-        st.stop()
+    with st.spinner("Analyzuji G-code..."):
+        try:
+            line_count, total_remaining, events = parse_gcode_bytes(raw)
+        except ValueError as error:
+            st.error(str(error))
+            st.stop()
 
     st.subheader("Souhrn")
 
@@ -288,12 +312,17 @@ if uploaded is not None:
 
     col1.metric("Celkový odhad", fmt_minutes(total_remaining))
     col2.metric("Počet M600 výměn", len(events))
-    col3.metric("Počet řádků", len(lines))
+    col3.metric("Počet řádků", line_count)
 
     if not events:
         st.warning("V souboru jsem nenašel žádné M600 výměny.")
     else:
         st.subheader("Intervaly výměn")
+
+        show_technical_columns = st.checkbox(
+            "Zobrazit technické detaily",
+            value=False,
+        )
 
         rows = []
 
@@ -314,6 +343,7 @@ if uploaded is not None:
                         else fmt_minutes(event["next_change_min"])
                     ),
                     "NEXT_CHANGE_MIN": event["next_change_min"],
+                    "Kritická": event.get("is_critical", False),
                 }
             )
 
@@ -329,10 +359,22 @@ if uploaded is not None:
                 "Barva": "",
                 "Další výměna za": "",
                 "NEXT_CHANGE_MIN": "",
+                "Kritická": False,
             }
         )
 
-        st.html(build_intervals_table_html(rows))
+        critical_events = [
+            event for event in events
+            if event.get("is_critical", False)
+        ]
+
+        if critical_events:
+            st.warning(
+                f"Pozor: {len(critical_events)} další výměna/výměny jsou do "
+                f"{CRITICAL_CHANGE_MINUTES} minut. V tabulce jsou zvýrazněné žlutě."
+            )
+
+        st.html(build_intervals_table_html(rows, show_technical_columns))
 
         st.subheader("M600 řádky")
 
@@ -352,16 +394,21 @@ if uploaded is not None:
 
         st.subheader("Export upraveného G-code")
 
-        modified = make_modified_gcode(lines, events)
-        original_name = Path(uploaded.name)
-        new_name = f"{original_name.stem}_nextchange{original_name.suffix or '.gcode'}"
+        if st.checkbox("Připravit G-code ke stažení s NEXT_CHANGE_MIN"):
+            with st.spinner("Připravuji upravený G-code..."):
+                modified = make_modified_gcode(raw, events)
 
-        st.download_button(
-            label="Stáhnout G-code s NEXT_CHANGE_MIN",
-            data=modified.encode("utf-8"),
-            file_name=new_name,
-            mime="text/plain",
-        )
+            original_name = Path(uploaded.name)
+            new_name = f"{original_name.stem}_nextchange{original_name.suffix or '.gcode'}"
+
+            st.download_button(
+                label="Stáhnout G-code s NEXT_CHANGE_MIN",
+                data=modified.encode("utf-8"),
+                file_name=new_name,
+                mime="text/plain",
+            )
+        else:
+            st.caption("Export se připraví až po zaškrtnutí, aby bylo prvotní načtení rychlejší.")
 
         st.caption(
             "Poznámka: výpočet používá M73 R... hodnoty z OrcaSliceru, "
