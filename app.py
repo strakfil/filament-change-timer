@@ -180,6 +180,7 @@ def build_intervals_table_html(rows: list[dict], show_technical_columns: bool = 
         <tr>
           <th style="text-align:left; padding:8px; border-bottom:1px solid #ddd;">Úsek</th>
           <th style="text-align:left; padding:8px; border-bottom:1px solid #ddd;">Interval</th>
+          <th style="text-align:left; padding:8px; border-bottom:1px solid #ddd;">Přibližný čas</th>
           <th style="text-align:left; padding:8px; border-bottom:1px solid #ddd;">Barva</th>
           {technical_headers}
         </tr>
@@ -206,6 +207,7 @@ def build_intervals_table_html(rows: list[dict], show_technical_columns: bool = 
         <tr style="{row_style}">
           <td style="padding:8px; border-bottom:1px solid #eee;">{html.escape(str(row["Úsek"]))}{warning_badge}</td>
           <td style="padding:8px; border-bottom:1px solid #eee;">{html.escape(str(row["Interval"]))}</td>
+          <td style="padding:8px; border-bottom:1px solid #eee;">{html.escape(str(row["Přibližný čas"]))}</td>
           <td style="padding:8px; border-bottom:1px solid #eee;">{build_color_badge(str(row["Barva"]))}</td>
           {technical_cells}
         </tr>
@@ -219,19 +221,18 @@ def build_intervals_table_html(rows: list[dict], show_technical_columns: bool = 
     return table_html
 
 
-def show_print_end_estimator(default_duration_min: Optional[int] = None):
-    st.subheader("Odhad konce tisku")
-
-    st.caption(
-        "Čas se počítá podle časové zóny Europe/Prague. "
-        "Zadej čas tisku podle OrcaSliceru a případný posun začátku kvůli nahřívání, "
-        "heat soaku, bed meshi nebo ruční přípravě."
-    )
-
+def get_timing_inputs(default_duration_min: Optional[int] = None):
     if default_duration_min is None:
         default_duration_min = 0
 
     default_hours, default_mins = divmod(int(default_duration_min), 60)
+
+    st.subheader("Časování tisku")
+
+    st.caption(
+        "Čas se počítá podle časové zóny Europe/Prague. "
+        "Posun začátku použij pro nahřívání, heat soak, bed mesh nebo ruční přípravu."
+    )
 
     col_a, col_b = st.columns(2)
 
@@ -282,6 +283,10 @@ def show_print_end_estimator(default_duration_min: Optional[int] = None):
     real_start = base_time + timedelta(minutes=int(start_delay_minutes))
     estimated_end = real_start + timedelta(minutes=duration_total)
 
+    return duration_total, real_start, estimated_end
+
+
+def show_print_end_summary(duration_total: int, real_start: datetime, estimated_end: datetime):
     if duration_total <= 0:
         st.info("Zadej čas tisku a zobrazí se odhad konce.")
         return
@@ -294,6 +299,16 @@ def show_print_end_estimator(default_duration_min: Optional[int] = None):
 
     if estimated_end.date() > real_start.date():
         st.warning(f"Tisk skončí další den v {estimated_end.strftime('%H:%M')}.")
+
+
+def format_event_time(real_start: datetime, elapsed_minutes: Optional[int]) -> str:
+    if elapsed_minutes is None or elapsed_minutes < 0:
+        return ""
+
+    event_time = real_start + timedelta(minutes=int(elapsed_minutes))
+    suffix = " +1 den" if event_time.date() > real_start.date() else ""
+
+    return f"{event_time.strftime('%H:%M')}{suffix}"
 
 
 st.set_page_config(
@@ -325,11 +340,15 @@ if uploaded is not None:
             st.error(str(error))
             st.stop()
 
+duration_total, real_start, estimated_end = get_timing_inputs(default_duration_min=total_remaining)
+show_print_end_summary(duration_total, real_start, estimated_end)
+
+if uploaded is not None:
     st.subheader("Souhrn")
 
     col1, col2, col3 = st.columns(3)
 
-    col1.metric("Celkový odhad", fmt_minutes(total_remaining))
+    col1.metric("Celkový odhad z G-code", fmt_minutes(total_remaining))
     col2.metric("Počet M600 výměn", len(events))
     col3.metric("Počet řádků", line_count)
 
@@ -352,6 +371,7 @@ if uploaded is not None:
                 {
                     "Úsek": label,
                     "Interval": fmt_minutes(event["interval_from_prev"]),
+                    "Přibližný čas": format_event_time(real_start, event["elapsed"]),
                     "Minuty": event["interval_from_prev"],
                     "Řádek": event["line_number"],
                     "NEXT": event["next"],
@@ -372,6 +392,8 @@ if uploaded is not None:
             {
                 "Úsek": f"{len(events)}. výměna → konec",
                 "Interval": fmt_minutes(last["remaining"]),
+                "Přibližný čas": estimated_end.strftime("%H:%M")
+                + (" +1 den" if estimated_end.date() > real_start.date() else ""),
                 "Minuty": last["remaining"],
                 "Řádek": "",
                 "NEXT": "",
@@ -432,7 +454,3 @@ if uploaded is not None:
         )
 else:
     st.info("Nahraj G-code soubor a hned uvidíš intervaly výměn.")
-
-st.divider()
-
-show_print_end_estimator(default_duration_min=total_remaining)
