@@ -1,10 +1,14 @@
 import html
 import re
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 import streamlit as st
 
+
+PRAGUE_TZ = ZoneInfo("Europe/Prague")
 
 M73_RE = re.compile(r"\bM73\b.*?\bR(\d+)\b")
 M600_RE = re.compile(r"^\s*M600\b", re.IGNORECASE)
@@ -16,7 +20,7 @@ def fmt_minutes(minutes: Optional[int]) -> str:
     if minutes is None or minutes < 0:
         return "?"
 
-    hours, mins = divmod(minutes, 60)
+    hours, mins = divmod(int(minutes), 60)
 
     if hours and mins:
         return f"{hours} h {mins} min"
@@ -90,7 +94,6 @@ def make_modified_gcode(lines: list[str], events: list[dict]) -> str:
         idx = event["line_index"]
         line = out_lines[idx]
 
-        # Pokud už tam NEXT_CHANGE_MIN je, přepiš ho.
         line = re.sub(r"\s+NEXT_CHANGE_MIN=-?\d+", "", line)
         line = f"{line} NEXT_CHANGE_MIN={event['next_change_min']}"
         out_lines[idx] = line
@@ -106,7 +109,6 @@ def normalize_hex_color(hex_color: str) -> str:
     if not color.startswith("#"):
         color = f"#{color}"
 
-    # Základní validace. Pokud barva není validní HEX, vrať prázdno.
     if not re.fullmatch(r"#[A-Fa-f0-9]{6}", color):
         return ""
 
@@ -118,9 +120,7 @@ def build_color_badge(hex_color: str) -> str:
     if not color:
         return ""
 
-    border = "#888"
-    if color == "#FFFFFF":
-        border = "#999"
+    border = "#999" if color == "#FFFFFF" else "#888"
 
     return (
         f'<span style="display:inline-flex;align-items:center;gap:8px;">'
@@ -172,6 +172,83 @@ def build_intervals_table_html(rows: list[dict]) -> str:
     return table_html
 
 
+def show_print_end_estimator(default_duration_min: Optional[int] = None):
+    st.subheader("Odhad konce tisku")
+
+    st.caption(
+        "Čas se počítá podle časové zóny Europe/Prague. "
+        "Zadej čas tisku podle OrcaSliceru a případný posun začátku kvůli nahřívání, "
+        "heat soaku, bed meshi nebo ruční přípravě."
+    )
+
+    if default_duration_min is None:
+        default_duration_min = 0
+
+    default_hours, default_mins = divmod(int(default_duration_min), 60)
+
+    col_a, col_b = st.columns(2)
+
+    with col_a:
+        duration_hours = st.number_input(
+            "Čas tisku — hodiny",
+            min_value=0,
+            max_value=999,
+            value=int(default_hours),
+            step=1,
+        )
+
+    with col_b:
+        duration_minutes = st.number_input(
+            "Čas tisku — minuty",
+            min_value=0,
+            max_value=59,
+            value=int(default_mins),
+            step=1,
+        )
+
+    col_c, col_d = st.columns(2)
+
+    with col_c:
+        current_time = st.time_input(
+            "Aktuální čas / čas výpočtu",
+            value=datetime.now(PRAGUE_TZ).time().replace(second=0, microsecond=0),
+        )
+
+    with col_d:
+        start_delay_minutes = st.number_input(
+            "Posun začátku tisku v minutách",
+            min_value=0,
+            max_value=1440,
+            value=0,
+            step=1,
+            help=(
+                "Například 15 min pro heat soak, bed mesh, nahřátí "
+                "nebo přípravu před reálným začátkem tisku."
+            ),
+        )
+
+    duration_total = int(duration_hours) * 60 + int(duration_minutes)
+
+    today_prague = datetime.now(PRAGUE_TZ).date()
+    base_time = datetime.combine(today_prague, current_time, tzinfo=PRAGUE_TZ)
+
+    real_start = base_time + timedelta(minutes=int(start_delay_minutes))
+    estimated_end = real_start + timedelta(minutes=duration_total)
+
+    if duration_total <= 0:
+        st.info("Zadej čas tisku a zobrazí se odhad konce.")
+        return
+
+    col1, col2, col3 = st.columns(3)
+
+    col1.metric("Reálný start", real_start.strftime("%H:%M"))
+    col2.metric("Délka tisku", fmt_minutes(duration_total))
+    col3.metric("Odhad konce", estimated_end.strftime("%H:%M"))
+
+    if estimated_end.date() > real_start.date():
+        st.warning(f"Tisk skončí další den v {estimated_end.strftime('%H:%M')}.")
+
+
 st.set_page_config(
     page_title="M600 G-code intervaly",
     page_icon="🧵",
@@ -186,107 +263,113 @@ st.caption(
 
 uploaded = st.file_uploader("Nahraj .gcode soubor", type=["gcode", "gco", "txt"])
 
-if uploaded is None:
+lines = []
+events = []
+total_remaining: Optional[int] = None
+
+if uploaded is not None:
+    raw = uploaded.read()
+
+    try:
+        text = raw.decode("utf-8", errors="replace")
+    except Exception:
+        st.error("Soubor se nepodařilo přečíst jako text.")
+        st.stop()
+
+    try:
+        lines, total_remaining, events = parse_gcode_text(text)
+    except ValueError as error:
+        st.error(str(error))
+        st.stop()
+
+    st.subheader("Souhrn")
+
+    col1, col2, col3 = st.columns(3)
+
+    col1.metric("Celkový odhad", fmt_minutes(total_remaining))
+    col2.metric("Počet M600 výměn", len(events))
+    col3.metric("Počet řádků", len(lines))
+
+    if not events:
+        st.warning("V souboru jsem nenašel žádné M600 výměny.")
+    else:
+        st.subheader("Intervaly výměn")
+
+        rows = []
+
+        for i, event in enumerate(events, start=1):
+            label = "Start → 1. výměna" if i == 1 else f"{i - 1}. → {i}. výměna"
+
+            rows.append(
+                {
+                    "Úsek": label,
+                    "Interval": fmt_minutes(event["interval_from_prev"]),
+                    "Minuty": event["interval_from_prev"],
+                    "Řádek": event["line_number"],
+                    "NEXT": event["next"],
+                    "Barva": event["color"],
+                    "Další výměna za": (
+                        "poslední výměna"
+                        if event["next_change_min"] < 0
+                        else fmt_minutes(event["next_change_min"])
+                    ),
+                    "NEXT_CHANGE_MIN": event["next_change_min"],
+                }
+            )
+
+        last = events[-1]
+
+        rows.append(
+            {
+                "Úsek": f"{len(events)}. výměna → konec",
+                "Interval": fmt_minutes(last["remaining"]),
+                "Minuty": last["remaining"],
+                "Řádek": "",
+                "NEXT": "",
+                "Barva": "",
+                "Další výměna za": "",
+                "NEXT_CHANGE_MIN": "",
+            }
+        )
+
+        st.html(build_intervals_table_html(rows))
+
+        st.subheader("M600 řádky")
+
+        for i, event in enumerate(events, start=1):
+            color_label = normalize_hex_color(event["color"]) or "bez barvy"
+
+            with st.expander(f"{i}. výměna — řádek {event['line_number']} — {color_label}"):
+                if event["color"]:
+                    st.html(build_color_badge(event["color"]))
+
+                st.code(event["line"], language="gcode")
+
+                if event["next_change_min"] > 0:
+                    st.write(f"Další výměna: **za {fmt_minutes(event['next_change_min'])}**")
+                else:
+                    st.write("Toto je poslední výměna filamentu.")
+
+        st.subheader("Export upraveného G-code")
+
+        modified = make_modified_gcode(lines, events)
+        original_name = Path(uploaded.name)
+        new_name = f"{original_name.stem}_nextchange{original_name.suffix or '.gcode'}"
+
+        st.download_button(
+            label="Stáhnout G-code s NEXT_CHANGE_MIN",
+            data=modified.encode("utf-8"),
+            file_name=new_name,
+            mime="text/plain",
+        )
+
+        st.caption(
+            "Poznámka: výpočet používá M73 R... hodnoty z OrcaSliceru, "
+            "tedy odhad zbývajícího času ve chvíli M600."
+        )
+else:
     st.info("Nahraj G-code soubor a hned uvidíš intervaly výměn.")
-    st.stop()
 
-raw = uploaded.read()
+st.divider()
 
-try:
-    text = raw.decode("utf-8", errors="replace")
-except Exception:
-    st.error("Soubor se nepodařilo přečíst jako text.")
-    st.stop()
-
-try:
-    lines, total_remaining, events = parse_gcode_text(text)
-except ValueError as error:
-    st.error(str(error))
-    st.stop()
-
-st.subheader("Souhrn")
-
-col1, col2, col3 = st.columns(3)
-col1.metric("Celkový odhad", fmt_minutes(total_remaining))
-col2.metric("Počet M600 výměn", len(events))
-col3.metric("Počet řádků", len(lines))
-
-if not events:
-    st.warning("V souboru jsem nenašel žádné M600 výměny.")
-    st.stop()
-
-st.subheader("Intervaly výměn")
-
-rows = []
-
-for i, event in enumerate(events, start=1):
-    label = "Start → 1. výměna" if i == 1 else f"{i - 1}. → {i}. výměna"
-
-    rows.append(
-        {
-            "Úsek": label,
-            "Interval": fmt_minutes(event["interval_from_prev"]),
-            "Minuty": event["interval_from_prev"],
-            "Řádek": event["line_number"],
-            "NEXT": event["next"],
-            "Barva": event["color"],
-            "Další výměna za": (
-                "poslední výměna"
-                if event["next_change_min"] < 0
-                else fmt_minutes(event["next_change_min"])
-            ),
-            "NEXT_CHANGE_MIN": event["next_change_min"],
-        }
-    )
-
-last = events[-1]
-
-rows.append(
-    {
-        "Úsek": f"{len(events)}. výměna → konec",
-        "Interval": fmt_minutes(last["remaining"]),
-        "Minuty": last["remaining"],
-        "Řádek": "",
-        "NEXT": "",
-        "Barva": "",
-        "Další výměna za": "",
-        "NEXT_CHANGE_MIN": "",
-    }
-)
-
-table_html = build_intervals_table_html(rows)
-st.html(table_html)
-
-st.subheader("M600 řádky")
-
-for i, event in enumerate(events, start=1):
-    color_label = normalize_hex_color(event["color"]) or "bez barvy"
-
-    with st.expander(f"{i}. výměna — řádek {event['line_number']} — {color_label}"):
-        if event["color"]:
-            st.markdown(build_color_badge(event["color"]), unsafe_allow_html=True)
-
-        st.code(event["line"], language="gcode")
-
-        if event["next_change_min"] > 0:
-            st.write(f"Další výměna: **za {fmt_minutes(event['next_change_min'])}**")
-        else:
-            st.write("Toto je poslední výměna filamentu.")
-
-st.subheader("Export upraveného G-code")
-
-modified = make_modified_gcode(lines, events)
-original_name = Path(uploaded.name)
-new_name = f"{original_name.stem}_nextchange{original_name.suffix or '.gcode'}"
-
-st.download_button(
-    label="Stáhnout G-code s NEXT_CHANGE_MIN",
-    data=modified.encode("utf-8"),
-    file_name=new_name,
-    mime="text/plain",
-)
-
-st.caption(
-    "Poznámka: výpočet používá M73 R... hodnoty z OrcaSliceru, "
-    "tedy odhad zbývajícího času ve chvíli M600."
-)
+show_print_end_estimator(default_duration_min=total_remaining)
